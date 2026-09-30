@@ -1,3 +1,5 @@
+"""GUI-facing data selection and filtering operations."""
+
 import os
 
 import numpy as np
@@ -8,6 +10,7 @@ from helper.physDataproc import load_multiple_files
 
 
 def detect_scan_parameters(file_paths):
+    """Return varying, non-metadata columns found in the first usable CSV file."""
     for file_path in file_paths:
         try:
             data = pd.read_csv(file_path, encoding="utf-8", skipinitialspace=True)
@@ -24,6 +27,7 @@ def detect_scan_parameters(file_paths):
 
 
 def _numeric_or_text(value):
+    """Convert numeric-looking filter values while preserving textual values."""
     try:
         return float(value)
     except (TypeError, ValueError):
@@ -31,6 +35,7 @@ def _numeric_or_text(value):
 
 
 def prepare_filtered_data(filedata, main_name=None, other_name=None, filter_mode="All points", other_value=None, value_column="atom_number_fit"):
+    """Extract finite x/y data and optionally average or filter by a second scan variable."""
     if filedata is None or filedata["data"].empty:
         return np.array([]), np.array([]), np.array([]), "Sample index", "Sample value"
 
@@ -72,6 +77,7 @@ def prepare_filtered_data(filedata, main_name=None, other_name=None, filter_mode
 
 
 def load_selected_data(file_paths, scan_var_names=None):
+    """Load selected CSV files using the scan variables chosen in the GUI."""
     if not file_paths:
         return None
     directories = [os.path.dirname(path) for path in file_paths]

@@ -1,3 +1,5 @@
+"""Numerical models used for decay and time-of-flight analysis."""
+
 import numpy as np
 from scipy.optimize import curve_fit
 
@@ -5,6 +7,7 @@ from helper import physicalConstants as pC
 
 
 def fit_exponential_decay(x_vals, y_vals):
+    """Fit ``y = amplitude * exp(-x / tau) + offset`` and return its parameters."""
     x_vals, y_vals = _finite_arrays(x_vals, y_vals)
     _require_fit_points(x_vals)
     x_range = np.ptp(x_vals)
@@ -15,6 +18,7 @@ def fit_exponential_decay(x_vals, y_vals):
 
 
 def fit_exponential_decay_no_offset(x_vals, y_vals):
+    """Fit a zero-offset exponential lifetime model and return amplitude and tau."""
     x_vals, y_vals = _finite_arrays(x_vals, y_vals)
     _require_fit_points(x_vals)
     x_range = np.ptp(x_vals)
@@ -24,10 +28,12 @@ def fit_exponential_decay_no_offset(x_vals, y_vals):
 
 
 def tof_para(t, temperature, sigma0, constants, atom):
+    """Calculate cloud width during time of flight for a temperature and atom."""
     return np.sqrt(sigma0**2 + 2 * constants["k_B"] * temperature / atom["m"] * (t / 1000) ** 2)
 
 
 def fit_tof_temperature(x_vals, sigma_vals):
+    """Estimate temperature and initial width from sigma squared versus time squared."""
     x_vals, sigma_vals = _finite_arrays(x_vals, sigma_vals)
     _require_fit_points(x_vals, minimum=3)
     slope, intercept = np.polyfit((x_vals / 1000) ** 2, sigma_vals**2, 1)
@@ -39,11 +45,13 @@ def fit_tof_temperature(x_vals, sigma_vals):
 
 
 def _finite_arrays(first, second):
+    """Return paired numeric arrays with all non-finite entries removed."""
     first, second = np.asarray(first, dtype=float), np.asarray(second, dtype=float)
     mask = np.isfinite(first) & np.isfinite(second)
     return first[mask], second[mask]
 
 
 def _require_fit_points(values, minimum=3):
+    """Raise an informative error when a fit has too few data points."""
     if len(values) < minimum:
         raise ValueError(f"At least {minimum} points are required for an exponential fit.")

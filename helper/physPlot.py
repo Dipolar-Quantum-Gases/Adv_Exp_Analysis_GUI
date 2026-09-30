@@ -1,3 +1,5 @@
+"""Low-level Matplotlib functions for two-dimensional scan data."""
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -20,6 +22,7 @@ def plot_2Ddata_scatter(
     show=True,
     bAvg=False,
 ):
+    """Plot a two-parameter scan, optionally averaging repeated x values."""
     unique_scan_var_1 = np.unique(scanVar1)
     color_map = plt.get_cmap(cMap)
     colors = color_map(np.linspace(0, 1, len(unique_scan_var_1)))
@@ -90,6 +93,7 @@ def plot_2Ddata_heatmap(
     grid=False,
     show=True,
 ):
+    """Plot averaged two-parameter scan values as a heatmap."""
     unique_scan_var_1 = np.unique(scanVar1)
     unique_scan_var_2 = np.unique(scanVar2)
     heatmap = np.full((len(unique_scan_var_2), len(unique_scan_var_1)), np.nan)
