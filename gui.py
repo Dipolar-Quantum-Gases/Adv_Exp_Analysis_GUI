@@ -10,6 +10,7 @@ Heavily use of integrated VS Code AI to create this analysis GUI for 2D experime
 #### Importing libraries
 ################################################
 
+import ast
 import os
 
 import numpy as np
@@ -20,19 +21,26 @@ import matplotlib.pyplot as plt
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QColorDialog,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -64,11 +72,13 @@ class DataAnalysisGUI(QWidget):
         # Application state is kept on the widget so every control uses the same selection.
         self.selected_files = []
         self.setWindowTitle("Experiment Data Analysis")
-        self.resize(1200, 700)
+        self.resize(1450, 800)
 
         self.file_metadata = {}
         self.current_file_path = None
         self._custom_file_selection = []
+        self.result_rows = []
+        self.workspace_variables = {}
 
         # The value columns are shared with the data-processing helpers.
         self.yparams = list(VAL_NAME)
@@ -242,10 +252,246 @@ class DataAnalysisGUI(QWidget):
         self.terminal_output.setMaximumHeight(250)
         right_group_layout.addWidget(self.terminal_output)
 
+        # Results workspace for fit parameters, manual values, and constants.
+        self._build_results_workspace(right_layout)
+
         # Keep the output panel compact while allowing the analysis controls to expand.
         right_layout.addStretch()
 
         self._refresh_analysis_controls()
+
+    def _build_results_workspace(self, parent_layout):
+        """Create tables and actions for collected results and physical constants."""
+        results_group = QGroupBox("Collected results")
+        results_layout = QVBoxLayout(results_group)
+
+        self.results_table = QTableWidget(0, 6)
+        self.results_table.setHorizontalHeaderLabels(["Keep", "Quantity", "Value", "Source", "Unit", "Origin"])
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.results_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        results_layout.addWidget(self.results_table)
+
+        results_buttons = QHBoxLayout()
+        add_button = QPushButton("Add data")
+        add_button.clicked.connect(self.add_manual_data)
+        results_buttons.addWidget(add_button)
+        transfer_button = QPushButton("Transfer kept to workspace")
+        transfer_button.clicked.connect(self.transfer_kept_to_workspace)
+        results_buttons.addWidget(transfer_button)
+        save_button = QPushButton("Save kept data")
+        save_button.clicked.connect(self.save_collected_data)
+        results_buttons.addWidget(save_button)
+        results_layout.addLayout(results_buttons)
+        parent_layout.addWidget(results_group)
+
+        self._build_workspace_panel(parent_layout)
+
+        constants_group = QGroupBox("Physical constants")
+        constants_layout = QVBoxLayout(constants_group)
+        self.constants_table = QTableWidget(0, 2)
+        self.constants_table.setHorizontalHeaderLabels(["Name", "Value"])
+        self.constants_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.constants_table.horizontalHeader().setStretchLastSection(True)
+        self._populate_constants_table()
+        constants_layout.addWidget(self.constants_table)
+        parent_layout.addWidget(constants_group)
+
+    def _build_workspace_panel(self, parent_layout):
+        """Create the panel holding transferred and custom workspace variables."""
+        workspace_group = QGroupBox("Workspace variables")
+        workspace_layout = QVBoxLayout(workspace_group)
+
+        self.workspace_table = QTableWidget(0, 4)
+        self.workspace_table.setHorizontalHeaderLabels(["Name", "Shape", "Value", "Source"])
+        self.workspace_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.workspace_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.workspace_table.horizontalHeader().setStretchLastSection(True)
+        workspace_layout.addWidget(self.workspace_table)
+
+        workspace_buttons = QHBoxLayout()
+        add_variable_button = QPushButton("Add custom variable")
+        add_variable_button.clicked.connect(self.add_custom_variable)
+        workspace_buttons.addWidget(add_variable_button)
+        remove_variable_button = QPushButton("Remove selected variable")
+        remove_variable_button.clicked.connect(self.remove_selected_variable)
+        workspace_buttons.addWidget(remove_variable_button)
+        workspace_layout.addLayout(workspace_buttons)
+        parent_layout.addWidget(workspace_group)
+
+    def _parse_array_literal(self, text):
+        """Parse scalars, comma lists, or nested lists into a NumPy array of any shape."""
+        parsed = ast.literal_eval(text)
+        return np.array(parsed, dtype=float)
+
+    def _set_workspace_variable(self, name, array, source):
+        """Store or overwrite a workspace variable under the given name."""
+        self.workspace_variables[name] = {"value": array, "source": source}
+        self._refresh_workspace_table()
+
+    def _refresh_workspace_table(self):
+        """Render workspace variables with their shape and a truncated value preview."""
+        names = sorted(self.workspace_variables)
+        self.workspace_table.setRowCount(len(names))
+        for row_index, name in enumerate(names):
+            variable = self.workspace_variables[name]
+            array = variable["value"]
+            preview = np.array2string(array, threshold=8, max_line_width=60)
+            self.workspace_table.setItem(row_index, 0, QTableWidgetItem(name))
+            self.workspace_table.setItem(row_index, 1, QTableWidgetItem(str(array.shape)))
+            self.workspace_table.setItem(row_index, 2, QTableWidgetItem(preview))
+            self.workspace_table.setItem(row_index, 3, QTableWidgetItem(variable["source"]))
+        self.workspace_table.resizeColumnsToContents()
+
+    def transfer_kept_to_workspace(self):
+        """Copy each kept result into the workspace as a named scalar variable."""
+        results = self._kept_results()
+        if not results:
+            QMessageBox.warning(self, "No data selected", "Select at least one kept result before transferring.")
+            return
+
+        for row in results:
+            name = f"{row['source']}_{row['quantity']}".replace(" ", "_")
+            try:
+                array = self._parse_array_literal(str(row["value"]))
+            except (ValueError, SyntaxError):
+                continue
+            self._set_workspace_variable(name, array, source=row["source"])
+
+    def add_custom_variable(self):
+        """Open a dialog for adding a scalar or array variable of any shape."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add custom variable")
+        form = QFormLayout(dialog)
+        name_field = QLineEdit()
+        value_field = QLineEdit()
+        form.addRow("Name:", name_field)
+        form.addRow("Value (e.g. 3.4 or 1,2,3 or [[1,2],[3,4]]):", value_field)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        name = name_field.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Invalid name", "Please enter a variable name.")
+            return
+        try:
+            array = self._parse_array_literal(value_field.text().strip())
+        except (ValueError, SyntaxError) as exc:
+            QMessageBox.warning(self, "Invalid value", f"Could not parse the value:\n{exc}")
+            return
+        self._set_workspace_variable(name, array, source="manual")
+
+    def remove_selected_variable(self):
+        """Remove the workspace variable selected in the workspace table."""
+        selected_items = self.workspace_table.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "No variable selected", "Select a variable in the workspace table first.")
+            return
+        name = self.workspace_table.item(selected_items[0].row(), 0).text()
+        self.workspace_variables.pop(name, None)
+        self._refresh_workspace_table()
+
+    def _populate_constants_table(self):
+        """Display universal constants and atomic parameters available to the analysis."""
+        rows = [(f"const.{name}", value) for name, value in pC.const.items()]
+        for atom_name, parameters in pC.atom.items():
+            for parameter_name, value in parameters.items():
+                if isinstance(value, dict):
+                    for nested_name, nested_value in value.items():
+                        rows.append((f"atom.{atom_name}.{parameter_name}.{nested_name}", nested_value))
+                else:
+                    rows.append((f"atom.{atom_name}.{parameter_name}", value))
+
+        self.constants_table.setRowCount(len(rows))
+        for row_index, (name, value) in enumerate(rows):
+            self.constants_table.setItem(row_index, 0, QTableWidgetItem(name))
+            self.constants_table.setItem(row_index, 1, QTableWidgetItem(str(value)))
+
+    def _refresh_results_table(self):
+        """Render collected rows while preserving each row's keep selection."""
+        self.results_table.setRowCount(len(self.result_rows))
+        for row_index, row in enumerate(self.result_rows):
+            keep_item = QTableWidgetItem()
+            keep_item.setFlags(keep_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            keep_item.setCheckState(Qt.CheckState.Checked if row.get("keep", True) else Qt.CheckState.Unchecked)
+            keep_item.setData(Qt.ItemDataRole.UserRole, row)
+            self.results_table.setItem(row_index, 0, keep_item)
+            for column, key in enumerate(("quantity", "value", "source", "unit", "origin"), start=1):
+                self.results_table.setItem(row_index, column, QTableWidgetItem(str(row.get(key, ""))))
+        self.results_table.resizeColumnsToContents()
+
+    def _replace_file_results(self, file_path, rows):
+        """Replace automatic rows for one file without disturbing manual rows."""
+        existing = {row["quantity"]: row for row in self.result_rows if row.get("file_path") == file_path and row.get("automatic")}
+        self.result_rows = [
+            row for row in self.result_rows
+            if not (row.get("file_path") == file_path and row.get("automatic"))
+        ]
+        for row in rows:
+            row["keep"] = existing.get(row["quantity"], {}).get("keep", True)
+            row["automatic"] = True
+            row["file_path"] = file_path
+            self.result_rows.append(row)
+        self._refresh_results_table()
+
+    def _kept_results(self):
+        """Return checked result rows, synchronizing checkbox states first."""
+        for row_index, row in enumerate(self.result_rows):
+            item = self.results_table.item(row_index, 0)
+            row["keep"] = item.checkState() == Qt.CheckState.Checked if item else row.get("keep", True)
+        return [row for row in self.result_rows if row.get("keep", True)]
+
+    def add_manual_data(self):
+        """Open a small form for adding a user-defined result row."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add data")
+        form = QFormLayout(dialog)
+        source = QLineEdit("Manual")
+        quantity = QLineEdit()
+        value = QLineEdit()
+        unit = QLineEdit()
+        form.addRow("Source:", source)
+        form.addRow("Quantity:", quantity)
+        form.addRow("Value:", value)
+        form.addRow("Unit:", unit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted and quantity.text().strip() and value.text().strip():
+            self.result_rows.append({
+                "source": source.text().strip() or "Manual",
+                "quantity": quantity.text().strip(),
+                "value": value.text().strip(),
+                "unit": unit.text().strip(),
+                "origin": "manual",
+                "keep": True,
+                "automatic": False,
+            })
+            self._refresh_results_table()
+
+    def save_collected_data(self):
+        """Save checked results and all displayed physical constants to a CSV file."""
+        results = self._kept_results()
+        if not results:
+            QMessageBox.warning(self, "No data selected", "Select or add at least one result before saving.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save collected data", "analysis_results.csv", "CSV files (*.csv)")
+        if not file_path:
+            return
+
+        output = pd.DataFrame(results, columns=["source", "quantity", "value", "unit", "origin"])
+        constants = pd.DataFrame(
+            [{"source": "physical constants", "quantity": self.constants_table.item(row, 0).text(), "value": self.constants_table.item(row, 1).text(), "unit": "", "origin": "constant"} for row in range(self.constants_table.rowCount())]
+        )
+        pd.concat([output, constants], ignore_index=True).to_csv(file_path, index=False)
+        self.status_label.setText(f"Saved {len(results)} collected result(s) to {os.path.basename(file_path)}")
 
     def _refresh_analysis_controls(self):
         """Refresh scan-parameter choices after the selected files change."""
@@ -472,6 +718,8 @@ class DataAnalysisGUI(QWidget):
                 y0_mean = np.nan
 
             # Fit only when a varying scan parameter is available.
+            popt = None
+            tof_popt = None
             if main_name != "N/A" and main_name in data.columns and data[main_name].nunique() > 1:
                 x_vals = data[main_name].to_numpy(dtype=float)
                 y_vals = atomnumber
@@ -499,6 +747,27 @@ class DataAnalysisGUI(QWidget):
                     tof_summary = "TOF fit: insufficient points"
             else:
                 tof_summary = "TOF fit: not available"
+
+            # Store reusable scalar results separately from the human-readable summary.
+            result_rows = [
+                {"source": label, "quantity": "atom_number_mean", "value": atom_mean, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "sigma_x_mean", "value": sigma_x_mean, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "sigma_y_mean", "value": sigma_y_mean, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "x0_mean", "value": x0_mean, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "y0_mean", "value": y0_mean, "unit": "", "origin": "summary"},
+            ]
+            if popt is not None:
+                result_rows.extend([
+                    {"source": label, "quantity": "decay_amplitude", "value": popt[0], "unit": "", "origin": "exponential fit"},
+                    {"source": label, "quantity": "decay_tau", "value": popt[2], "unit": "", "origin": "exponential fit"},
+                    {"source": label, "quantity": "decay_offset", "value": popt[1], "unit": "", "origin": "exponential fit"},
+                ])
+            if tof_popt is not None:
+                result_rows.extend([
+                    {"source": label, "quantity": "tof_temperature", "value": tof_popt[0], "unit": "K", "origin": "TOF fit"},
+                    {"source": label, "quantity": "tof_sigma0", "value": tof_popt[1], "unit": "m", "origin": "TOF fit"},
+                ])
+            self._replace_file_results(file_path, result_rows)
 
             text = (
                 f"File: {label}\n"
