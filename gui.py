@@ -11,6 +11,7 @@ Heavily use of integrated VS Code AI to create this analysis GUI for 2D experime
 ################################################
 
 import ast
+import json
 import os
 
 import numpy as np
@@ -370,6 +371,16 @@ class DataAnalysisGUI(QWidget):
         function_button.clicked.connect(self.create_variable_from_function)
         workspace_buttons.addWidget(function_button)
         workspace_layout.addLayout(workspace_buttons)
+
+        persistence_buttons = QHBoxLayout()
+        save_workspace_button = QPushButton("Save workspace")
+        save_workspace_button.clicked.connect(self.save_workspace)
+        persistence_buttons.addWidget(save_workspace_button)
+        load_workspace_button = QPushButton("Load workspace")
+        load_workspace_button.clicked.connect(self.load_workspace)
+        persistence_buttons.addWidget(load_workspace_button)
+        workspace_layout.addLayout(persistence_buttons)
+
         parent_layout.addWidget(workspace_section)
 
     def _build_workspace_plot_panel(self, parent_layout):
@@ -537,6 +548,50 @@ class DataAnalysisGUI(QWidget):
         name = self.workspace_table.item(selected_items[0].row(), 0).text()
         self.workspace_variables.pop(name, None)
         self._refresh_workspace_table()
+
+    def save_workspace(self):
+        """Save every workspace variable (values and source) to a JSON file."""
+        if not self.workspace_variables:
+            QMessageBox.warning(self, "Nothing to save", "The workspace has no variables to save yet.")
+            return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save workspace variables", "workspace.json", "JSON files (*.json)")
+        if not file_path:
+            return
+
+        payload = {
+            name: {"value": variable["value"].tolist(), "source": variable["source"]}
+            for name, variable in self.workspace_variables.items()
+        }
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save failed", f"Could not save the workspace:\n{exc}")
+            return
+        self.status_label.setText(f"Saved {len(payload)} workspace variable(s) to {os.path.basename(file_path)}")
+
+    def load_workspace(self):
+        """Load workspace variables from a previously saved JSON file, merging with existing ones."""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Load workspace variables", "", "JSON files (*.json)")
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            QMessageBox.critical(self, "Load failed", f"Could not load the workspace:\n{exc}")
+            return
+
+        loaded = 0
+        for name, entry in payload.items():
+            try:
+                array = np.asarray(entry["value"], dtype=float)
+            except (KeyError, ValueError, TypeError):
+                continue
+            self._set_workspace_variable(name, array, source=entry.get("source", "loaded"))
+            loaded += 1
+        self.status_label.setText(f"Loaded {loaded} workspace variable(s) from {os.path.basename(file_path)}")
 
     def create_variable_from_function(self):
         """Open a dialog that evaluates an expression over workspace variables and constants."""
