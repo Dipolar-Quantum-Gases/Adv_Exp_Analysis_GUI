@@ -75,15 +75,16 @@ class CollapsibleSection(QWidget):
         self.toggle_button = QToolButton(self)
         self.toggle_button.setText(title)
         self.toggle_button.setCheckable(True)
-        self.toggle_button.setChecked(True)
+        self.toggle_button.setChecked(False)
         self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.toggle_button.setArrowType(Qt.ArrowType.DownArrow)
+        self.toggle_button.setArrowType(Qt.ArrowType.RightArrow)
         self.toggle_button.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
         self.toggle_button.clicked.connect(self._on_toggled)
 
         self.content_area = QWidget(self)
         self.content_layout = QVBoxLayout(self.content_area)
         self.content_layout.setContentsMargins(4, 0, 4, 4)
+        self.content_area.setVisible(False)
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
@@ -300,6 +301,11 @@ class DataAnalysisGUI(QWidget):
         results_section = CollapsibleSection("Collected results")
         results_layout = results_section.content_layout
 
+        self.results_search_field = QLineEdit()
+        self.results_search_field.setPlaceholderText("Search quantity / source / origin...")
+        self.results_search_field.textChanged.connect(self._apply_results_filter)
+        results_layout.addWidget(self.results_search_field)
+
         self.results_table = QTableWidget(0, 6)
         self.results_table.setHorizontalHeaderLabels(["Keep", "Quantity", "Value", "Source", "Unit", "Origin"])
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -321,6 +327,7 @@ class DataAnalysisGUI(QWidget):
         parent_layout.addWidget(results_section)
 
         self._build_workspace_panel(parent_layout)
+        self._build_workspace_plot_panel(parent_layout)
 
         constants_section = CollapsibleSection("Physical constants")
         constants_layout = constants_section.content_layout
@@ -367,13 +374,97 @@ class DataAnalysisGUI(QWidget):
         remove_variable_button = QPushButton("Remove selected variable")
         remove_variable_button.clicked.connect(self.remove_selected_variable)
         workspace_buttons.addWidget(remove_variable_button)
+        function_button = QPushButton("Create from function")
+        function_button.clicked.connect(self.create_variable_from_function)
+        workspace_buttons.addWidget(function_button)
         workspace_layout.addLayout(workspace_buttons)
         parent_layout.addWidget(workspace_section)
 
+    def _build_workspace_plot_panel(self, parent_layout):
+        """Create controls for plotting workspace arrays/variables against each other."""
+        plot_section = CollapsibleSection("Plot from workspace")
+        plot_layout = plot_section.content_layout
+
+        self.workspace_x_combo = QComboBox()
+        self._make_searchable(self.workspace_x_combo)
+        plot_layout.addWidget(QLabel("X variable:"))
+        plot_layout.addWidget(self.workspace_x_combo)
+
+        self.workspace_y_combo = QComboBox()
+        self._make_searchable(self.workspace_y_combo)
+        plot_layout.addWidget(QLabel("Y variable:"))
+        plot_layout.addWidget(self.workspace_y_combo)
+
+        self.workspace_fit_combo = QComboBox()
+        self.workspace_fit_combo.addItems([
+            "No fit",
+            "Exponential decay (with offset)",
+            "Exponential decay (lifetime)",
+            "TOF temperature",
+        ])
+        plot_layout.addWidget(QLabel("Fit type:"))
+        plot_layout.addWidget(self.workspace_fit_combo)
+
+        plot_button = QPushButton("Plot workspace variables")
+        plot_button.clicked.connect(self.plot_workspace_variables)
+        plot_layout.addWidget(plot_button)
+        parent_layout.addWidget(plot_section)
+
+    def _refresh_workspace_plot_controls(self):
+        """Keep the workspace X/Y pickers in sync with the current variable names."""
+        names = sorted(self.workspace_variables)
+        for combo in (self.workspace_x_combo, self.workspace_y_combo):
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(names)
+            if current in names:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
+
+    def plot_workspace_variables(self):
+        """Plot one workspace variable against another, with an optional fit."""
+        x_name = self.workspace_x_combo.currentText()
+        y_name = self.workspace_y_combo.currentText()
+        if x_name not in self.workspace_variables or y_name not in self.workspace_variables:
+            QMessageBox.warning(self, "Invalid selection", "Choose an X and a Y variable from the workspace.")
+            return
+
+        x_vals = np.ravel(self.workspace_variables[x_name]["value"])
+        y_vals = np.ravel(self.workspace_variables[y_name]["value"])
+        if x_vals.size != y_vals.size:
+            QMessageBox.warning(self, "Shape mismatch", f"'{x_name}' has {x_vals.size} values but '{y_name}' has {y_vals.size}.")
+            return
+
+        try:
+            plt.figure()
+            self._plot_series_with_fit(
+                x_vals, y_vals, np.zeros_like(y_vals), None, f"{y_name} vs {x_name}",
+                self.workspace_fit_combo.currentText(), use_errorbar=False,
+            )
+            plt.xlabel(x_name)
+            plt.ylabel(y_name)
+            plt.grid(True)
+            plt.legend()
+            plt.tight_layout()
+            plt.show()
+        except Exception as exc:
+            QMessageBox.critical(self, "Plot failed", f"A problem occurred while plotting workspace variables:\n{exc}")
+
     def _parse_array_literal(self, text):
         """Parse scalars, comma lists, or nested lists into a NumPy array of any shape."""
-        parsed = ast.literal_eval(text)
+        try:
+            parsed = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            # ast.literal_eval rejects bare nan/inf tokens, so evaluate those as a fallback.
+            parsed = eval(text, {"__builtins__": {}, "nan": float("nan"), "inf": float("inf")})
         return np.array(parsed, dtype=float)
+
+    def _coerce_to_array(self, value):
+        """Convert a stored result value (already numeric, or a typed literal) into an array."""
+        if isinstance(value, (list, tuple, np.ndarray, int, float, np.floating, np.integer)):
+            return np.asarray(value, dtype=float)
+        return self._parse_array_literal(str(value))
 
     def _set_workspace_variable(self, name, array, source):
         """Store or overwrite a workspace variable under the given name."""
@@ -393,6 +484,7 @@ class DataAnalysisGUI(QWidget):
             self.workspace_table.setItem(row_index, 2, QTableWidgetItem(preview))
             self.workspace_table.setItem(row_index, 3, QTableWidgetItem(variable["source"]))
         self.workspace_table.resizeColumnsToContents()
+        self._refresh_workspace_plot_controls()
 
     def transfer_kept_to_workspace(self):
         """Copy each kept result into the workspace as a named scalar variable."""
@@ -404,8 +496,8 @@ class DataAnalysisGUI(QWidget):
         for row in results:
             name = f"{row['source']}_{row['quantity']}".replace(" ", "_")
             try:
-                array = self._parse_array_literal(str(row["value"]))
-            except (ValueError, SyntaxError):
+                array = self._coerce_to_array(row["value"])
+            except (ValueError, SyntaxError, TypeError, NameError):
                 continue
             self._set_workspace_variable(name, array, source=row["source"])
 
@@ -458,6 +550,64 @@ class DataAnalysisGUI(QWidget):
         name = self.workspace_table.item(selected_items[0].row(), 0).text()
         self.workspace_variables.pop(name, None)
         self._refresh_workspace_table()
+
+    def create_variable_from_function(self):
+        """Open a dialog that evaluates an expression over workspace variables and constants."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Create variable from function")
+        form = QFormLayout(dialog)
+
+        name_field = QLineEdit()
+        form.addRow("New variable name:", name_field)
+
+        # Templates insert a starting point; identifiers still need to match workspace variable names.
+        templates = {
+            "Custom expression": "",
+            "Mean of X": "np.mean(X)",
+            "Standard deviation of X": "np.std(X)",
+            "Sum of X": "np.sum(X)",
+            "Normalize X (X / max(X))": "X / np.max(X)",
+            "Gaussian cloud density N / V": "N / ((2 * np.pi) ** 1.5 * sx * sy * sz)",
+        }
+        template_combo = QComboBox()
+        template_combo.addItems(templates.keys())
+        form.addRow("Template:", template_combo)
+
+        expression_field = QLineEdit()
+        template_combo.currentTextChanged.connect(lambda text: expression_field.setText(templates[text]))
+        form.addRow("Expression:", expression_field)
+
+        available = ", ".join(sorted(self.workspace_variables)) or "(no workspace variables yet)"
+        help_label = QLabel(f"Available: {available}\nAlso usable: const[...], atom[...][...], np, and indexing like f[0]")
+        help_label.setWordWrap(True)
+        form.addRow(help_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        name = name_field.text().strip()
+        expression = expression_field.text().strip()
+        if not name or not expression:
+            QMessageBox.warning(self, "Invalid input", "Please provide both a variable name and an expression.")
+            return
+
+        namespace = {variable_name: variable["value"] for variable_name, variable in self.workspace_variables.items()}
+        namespace.update({"np": np, "const": pC.const, "atom": pC.atom})
+        safe_builtins = {"abs": abs, "min": min, "max": max, "sum": sum, "len": len, "range": range}
+
+        try:
+            result = eval(expression, {"__builtins__": safe_builtins}, namespace)
+            array = np.asarray(result, dtype=float)
+        except Exception as exc:
+            QMessageBox.warning(self, "Evaluation failed", f"Could not evaluate the expression:\n{exc}")
+            return
+
+        self._set_workspace_variable(name, array, source=f"function: {expression}")
 
     def _populate_constants_table(self, species="All"):
         """Display physical constants, optionally filtered to a single atomic species."""
@@ -512,6 +662,14 @@ class DataAnalysisGUI(QWidget):
             for column, key in enumerate(("quantity", "value", "source", "unit", "origin"), start=1):
                 self.results_table.setItem(row_index, column, QTableWidgetItem(str(row.get(key, ""))))
         self.results_table.resizeColumnsToContents()
+        self._apply_results_filter()
+
+    def _apply_results_filter(self):
+        """Hide result rows whose quantity, source, or origin don't match the search text."""
+        filter_text = self.results_search_field.text().strip().lower()
+        for row_index, row in enumerate(self.result_rows):
+            haystack = f"{row.get('quantity', '')} {row.get('source', '')} {row.get('origin', '')}".lower()
+            self.results_table.setRowHidden(row_index, bool(filter_text) and filter_text not in haystack)
 
     def _replace_file_results(self, file_path, rows):
         """Replace automatic rows for one file without disturbing manual rows."""
