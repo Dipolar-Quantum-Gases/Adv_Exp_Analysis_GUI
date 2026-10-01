@@ -54,15 +54,12 @@ from helper.dataprocessing.analysis import (
     prepare_filtered_data as _prepare_filtered_data,
     split_filtered_data_by_other,
 )
-from helper.fitting.models import (
-    fit_exponential_decay,
-    fit_exponential_decay_no_offset,
-    fit_tof_temperature,
-    tof_para,
-)
+from helper.fitting.registry import FIT_NAMES, get_fit_definition
+from helper.formatting import format_with_uncertainty, mean_with_sem
 from helper import physicalConstants as pC
 from helper.physDataproc import get_ExpObserv
 from helper.plotting.analysis import plot_loaded_data
+from helper.dataprocessing.expressions import EXPRESSION_TEMPLATES, evaluate_expression
 
 plt.close("all")
 
@@ -249,12 +246,7 @@ class DataAnalysisGUI(QWidget):
         middle_group_layout.addWidget(self.filter_value_combo)
 
         self.fit_type_combo = QComboBox(self)
-        self.fit_type_combo.addItems([
-            "No fit",
-            "Exponential decay (with offset)",
-            "Exponential decay (lifetime)",
-            "TOF temperature",
-        ])
+        self.fit_type_combo.addItems(FIT_NAMES)
         self.fit_type_combo.setVisible(False)
         middle_group_layout.addWidget(QLabel("Fit type: "))
         middle_group_layout.addWidget(self.fit_type_combo)
@@ -396,12 +388,7 @@ class DataAnalysisGUI(QWidget):
         plot_layout.addWidget(self.workspace_y_combo)
 
         self.workspace_fit_combo = QComboBox()
-        self.workspace_fit_combo.addItems([
-            "No fit",
-            "Exponential decay (with offset)",
-            "Exponential decay (lifetime)",
-            "TOF temperature",
-        ])
+        self.workspace_fit_combo.addItems(FIT_NAMES)
         plot_layout.addWidget(QLabel("Fit type:"))
         plot_layout.addWidget(self.workspace_fit_combo)
 
@@ -560,15 +547,8 @@ class DataAnalysisGUI(QWidget):
         name_field = QLineEdit()
         form.addRow("New variable name:", name_field)
 
-        # Templates insert a starting point; identifiers still need to match workspace variable names.
-        templates = {
-            "Custom expression": "",
-            "Mean of X": "np.mean(X)",
-            "Standard deviation of X": "np.std(X)",
-            "Sum of X": "np.sum(X)",
-            "Normalize X (X / max(X))": "X / np.max(X)",
-            "Gaussian cloud density N / V": "N / ((2 * np.pi) ** 1.5 * sx * sy * sz)",
-        }
+        # Selecting a template fills the expression field; see helper/dataprocessing/expressions.py to add more.
+        templates = dict(EXPRESSION_TEMPLATES)
         template_combo = QComboBox()
         template_combo.addItems(templates.keys())
         form.addRow("Template:", template_combo)
@@ -596,13 +576,8 @@ class DataAnalysisGUI(QWidget):
             QMessageBox.warning(self, "Invalid input", "Please provide both a variable name and an expression.")
             return
 
-        namespace = {variable_name: variable["value"] for variable_name, variable in self.workspace_variables.items()}
-        namespace.update({"np": np, "const": pC.const, "atom": pC.atom})
-        safe_builtins = {"abs": abs, "min": min, "max": max, "sum": sum, "len": len, "range": range}
-
         try:
-            result = eval(expression, {"__builtins__": safe_builtins}, namespace)
-            array = np.asarray(result, dtype=float)
+            array = evaluate_expression(expression, self.workspace_variables)
         except Exception as exc:
             QMessageBox.warning(self, "Evaluation failed", f"Could not evaluate the expression:\n{exc}")
             return
@@ -650,6 +625,14 @@ class DataAnalysisGUI(QWidget):
                 continue
             self._set_workspace_variable(name, array, source="physical constant")
 
+    def _format_result_value(self, row):
+        """Render a result's value, combined with its standard error when available."""
+        value = row.get("value")
+        error = row.get("error")
+        if error is not None and np.isfinite(error) and isinstance(value, (int, float, np.floating, np.integer)):
+            return format_with_uncertainty(value, error)
+        return str(value)
+
     def _refresh_results_table(self):
         """Render collected rows while preserving each row's keep selection."""
         self.results_table.setRowCount(len(self.result_rows))
@@ -659,8 +642,15 @@ class DataAnalysisGUI(QWidget):
             keep_item.setCheckState(Qt.CheckState.Checked if row.get("keep", False) else Qt.CheckState.Unchecked)
             keep_item.setData(Qt.ItemDataRole.UserRole, row)
             self.results_table.setItem(row_index, 0, keep_item)
+            display_values = {
+                "quantity": row.get("quantity", ""),
+                "value": self._format_result_value(row),
+                "source": row.get("source", ""),
+                "unit": row.get("unit", ""),
+                "origin": row.get("origin", ""),
+            }
             for column, key in enumerate(("quantity", "value", "source", "unit", "origin"), start=1):
-                self.results_table.setItem(row_index, column, QTableWidgetItem(str(row.get(key, ""))))
+                self.results_table.setItem(row_index, column, QTableWidgetItem(str(display_values[key])))
         self.results_table.resizeColumnsToContents()
         self._apply_results_filter()
 
@@ -692,12 +682,22 @@ class DataAnalysisGUI(QWidget):
             row["keep"] = item.checkState() == Qt.CheckState.Checked if item else row.get("keep", False)
         return [row for row in self.result_rows if row.get("keep", False)]
 
-    def _record_result(self, source, quantity, value, unit, origin):
-        """Add a newly computed fit or summary value to the collected-results table."""
+    def _record_result(self, source, quantity, value, unit, origin, error=None):
+        """Add a newly computed fit or summary value (with optional standard error)."""
         self.result_rows.append({
-            "source": source, "quantity": quantity, "value": value, "unit": unit,
+            "source": source, "quantity": quantity, "value": value, "error": error, "unit": unit,
             "origin": origin, "keep": False, "automatic": False,
         })
+        self._refresh_results_table()
+
+    def _record_average_results(self, source, x_label, x_vals, y_label, y_vals, y_err):
+        """Add each averaged point's value and its standard error to the collected results."""
+        for x, y, err in zip(x_vals, y_vals, y_err):
+            quantity = f"{y_label}_avg_at_{x_label}={x:.6g}"
+            self.result_rows.append({
+                "source": source, "quantity": quantity, "value": float(y), "error": float(err),
+                "unit": "", "origin": "average", "keep": False, "automatic": False,
+            })
         self._refresh_results_table()
 
     def _record_file_arrays(self, file_path, label, data):
@@ -766,9 +766,20 @@ class DataAnalysisGUI(QWidget):
         if not file_path:
             return
 
-        output = pd.DataFrame(results, columns=["source", "quantity", "value", "unit", "origin"])
+        rows = [
+            {
+                "source": row.get("source", ""),
+                "quantity": row.get("quantity", ""),
+                "value": self._format_result_value(row),
+                "error": row.get("error", ""),
+                "unit": row.get("unit", ""),
+                "origin": row.get("origin", ""),
+            }
+            for row in results
+        ]
+        output = pd.DataFrame(rows, columns=["source", "quantity", "value", "error", "unit", "origin"])
         constants = pd.DataFrame(
-            [{"source": "physical constants", "quantity": self.constants_table.item(row, 0).text(), "value": self.constants_table.item(row, 1).text(), "unit": "", "origin": "constant"} for row in range(self.constants_table.rowCount())]
+            [{"source": "physical constants", "quantity": self.constants_table.item(row, 0).text(), "value": self.constants_table.item(row, 1).text(), "error": "", "unit": "", "origin": "constant"} for row in range(self.constants_table.rowCount())]
         )
         pd.concat([output, constants], ignore_index=True).to_csv(file_path, index=False)
         self.status_label.setText(f"Saved {len(results)} collected result(s) to {os.path.basename(file_path)}")
@@ -1002,57 +1013,51 @@ class DataAnalysisGUI(QWidget):
             scan_params = detect_scan_parameters([file_path])
             main_name = scan_params[0] if scan_params else "N/A"
             atomnumber, sigma_x, sigma_y, x0, y0 = get_ExpObserv(data[VAL_NAME], sample_factor=SAMPLE)
-            if len(atomnumber) > 0:
-                atom_mean = float(np.nanmean(atomnumber))
-                sigma_x_mean = float(np.nanmean(sigma_x))
-                sigma_y_mean = float(np.nanmean(sigma_y))
-                x0_mean = float(np.nanmean(x0))
-                y0_mean = float(np.nanmean(y0))
-            else:
-                atom_mean = np.nan
-                sigma_x_mean = np.nan
-                sigma_y_mean = np.nan
-                x0_mean = np.nan
-                y0_mean = np.nan
+            atom_mean, atom_sem = mean_with_sem(atomnumber)
+            sigma_x_mean, sigma_x_sem = mean_with_sem(sigma_x)
+            sigma_y_mean, sigma_y_sem = mean_with_sem(sigma_y)
+            x0_mean, x0_sem = mean_with_sem(x0)
+            y0_mean, y0_sem = mean_with_sem(y0)
 
-            # Fit only when a varying scan parameter is available.
-            popt = None
-            tof_popt = None
-            if main_name != "N/A" and main_name in data.columns and data[main_name].nunique() > 1:
+            # Quick-look fits reuse the same registry as the plotting panels.
+            decay_fit = get_fit_definition("Exponential decay (with offset)")
+            tof_fit = get_fit_definition("TOF temperature")
+            has_varying_main = main_name != "N/A" and main_name in data.columns and data[main_name].nunique() > 1
+            popt = perr = tof_popt = tof_perr = None
+
+            if has_varying_main:
                 x_vals = data[main_name].to_numpy(dtype=float)
-                y_vals = atomnumber
-                finite = np.isfinite(x_vals) & np.isfinite(y_vals)
-                x_vals = x_vals[finite]
-                y_vals = y_vals[finite]
-                if len(x_vals) >= 3:
-                    popt = fit_exponential_decay(x_vals, y_vals)
-                    fit_summary = f"Exponential fit: A={popt[0]:.3g}, tau={popt[2]:.3g}, offset={popt[1]:.3g}"
+                finite = np.isfinite(x_vals) & np.isfinite(atomnumber)
+                if np.count_nonzero(finite) >= 3:
+                    popt, perr = decay_fit.fit(x_vals[finite], atomnumber[finite])
+                    fit_summary = (
+                        f"Exponential fit: A={format_with_uncertainty(popt[0], perr[0])}, "
+                        f"tau={format_with_uncertainty(popt[2], perr[2])}, "
+                        f"offset={format_with_uncertainty(popt[1], perr[1])}"
+                    )
                 else:
                     fit_summary = "Exponential fit: insufficient points"
-            else:
-                fit_summary = "Exponential fit: not available"
 
-            if main_name != "N/A" and main_name in data.columns and data[main_name].nunique() > 1:
-                x_vals = data[main_name].to_numpy(dtype=float)
-                sigma_vals = sigma_x
-                finite = np.isfinite(x_vals) & np.isfinite(sigma_vals)
-                x_vals = x_vals[finite]
-                sigma_vals = sigma_vals[finite]
-                if len(x_vals) >= 3:
-                    tof_popt = fit_tof_temperature(x_vals, sigma_vals)
-                    tof_summary = f"TOF T_x = {tof_popt[0] * 1e6:.3g} uK, sigma0_x = {tof_popt[1] * 1e6:.3g} um"
+                finite = np.isfinite(x_vals) & np.isfinite(sigma_x)
+                if np.count_nonzero(finite) >= 3:
+                    tof_popt, tof_perr = tof_fit.fit(x_vals[finite], sigma_x[finite])
+                    tof_summary = (
+                        f"TOF T_x = {format_with_uncertainty(tof_popt[0] * 1e6, tof_perr[0] * 1e6)} uK, "
+                        f"sigma0_x = {format_with_uncertainty(tof_popt[1] * 1e6, tof_perr[1] * 1e6)} um"
+                    )
                 else:
                     tof_summary = "TOF fit: insufficient points"
             else:
+                fit_summary = "Exponential fit: not available"
                 tof_summary = "TOF fit: not available"
 
             # Store reusable scalar results separately from the human-readable summary.
             result_rows = [
-                {"source": label, "quantity": "atom_number_mean", "value": atom_mean, "unit": "", "origin": "summary"},
-                {"source": label, "quantity": "sigma_x_mean", "value": sigma_x_mean, "unit": "", "origin": "summary"},
-                {"source": label, "quantity": "sigma_y_mean", "value": sigma_y_mean, "unit": "", "origin": "summary"},
-                {"source": label, "quantity": "x0_mean", "value": x0_mean, "unit": "", "origin": "summary"},
-                {"source": label, "quantity": "y0_mean", "value": y0_mean, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "atom_number_mean", "value": atom_mean, "error": atom_sem, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "sigma_x_mean", "value": sigma_x_mean, "error": sigma_x_sem, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "sigma_y_mean", "value": sigma_y_mean, "error": sigma_y_sem, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "x0_mean", "value": x0_mean, "error": x0_sem, "unit": "", "origin": "summary"},
+                {"source": label, "quantity": "y0_mean", "value": y0_mean, "error": y0_sem, "unit": "", "origin": "summary"},
             ]
             # Keep the full data column for every scan parameter and fit observable available.
             for name in scan_params:
@@ -1062,27 +1067,20 @@ class DataAnalysisGUI(QWidget):
                 if name in data.columns:
                     result_rows.append({"source": label, "quantity": name, "value": data[name].tolist(), "unit": "", "origin": "value array"})
             if popt is not None:
-                result_rows.extend([
-                    {"source": label, "quantity": "decay_amplitude", "value": popt[0], "unit": "", "origin": "exponential fit"},
-                    {"source": label, "quantity": "decay_tau", "value": popt[2], "unit": "", "origin": "exponential fit"},
-                    {"source": label, "quantity": "decay_offset", "value": popt[1], "unit": "", "origin": "exponential fit"},
-                ])
+                result_rows.extend(decay_fit.record_rows(label, popt, perr))
             if tof_popt is not None:
-                result_rows.extend([
-                    {"source": label, "quantity": "tof_temperature", "value": tof_popt[0], "unit": "K", "origin": "TOF fit"},
-                    {"source": label, "quantity": "tof_sigma0", "value": tof_popt[1], "unit": "m", "origin": "TOF fit"},
-                ])
+                result_rows.extend(tof_fit.record_rows(label, tof_popt, tof_perr))
             self._replace_file_results(file_path, result_rows)
 
             text = (
                 f"File: {label}\n"
                 f"Path: {file_path}\n"
                 f"Detected scan parameter: {main_name}\n"
-                f"Mean atom number: {atom_mean:.6g}\n"
-                f"Mean sigma_x: {sigma_x_mean:.6g}\n"
-                f"Mean sigma_y: {sigma_y_mean:.6g}\n"
-                f"Mean x0: {x0_mean:.6g}\n"
-                f"Mean y0: {y0_mean:.6g}\n"
+                f"Mean atom number: {format_with_uncertainty(atom_mean, atom_sem)}\n"
+                f"Mean sigma_x: {format_with_uncertainty(sigma_x_mean, sigma_x_sem)}\n"
+                f"Mean sigma_y: {format_with_uncertainty(sigma_y_mean, sigma_y_sem)}\n"
+                f"Mean x0: {format_with_uncertainty(x0_mean, x0_sem)}\n"
+                f"Mean y0: {format_with_uncertainty(y0_mean, y0_sem)}\n"
                 f"{fit_summary}\n"
                 f"{tof_summary}"
             )
@@ -1259,30 +1257,16 @@ class DataAnalysisGUI(QWidget):
 
         if fit_type == "No fit" or len(x_vals) <= 2:
             return
+        fit_definition = get_fit_definition(fit_type)
+        if fit_definition is None:
+            return
         try:
+            popt, perr = fit_definition.fit(x_vals, y_vals)
             x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
-            if fit_type == "Exponential decay (with offset)":
-                popt = fit_exponential_decay(x_vals, y_vals)
-                y_fit = popt[0] * np.exp(-x_smooth / popt[2]) + popt[1]
-                fit_label = f"{label} fit: τ={popt[2]:.3f}"
-                self._record_result(label, "decay_amplitude", popt[0], "", "1D fit")
-                self._record_result(label, "decay_tau", popt[2], "", "1D fit")
-                self._record_result(label, "decay_offset", popt[1], "", "1D fit")
-            elif fit_type == "Exponential decay (lifetime)":
-                popt = fit_exponential_decay_no_offset(x_vals, y_vals)
-                y_fit = popt[0] * np.exp(-x_smooth / popt[1])
-                fit_label = f"{label} lifetime: τ={popt[1]:.3f}"
-                self._record_result(label, "lifetime_amplitude", popt[0], "", "1D fit")
-                self._record_result(label, "lifetime_tau", popt[1], "", "1D fit")
-            elif fit_type == "TOF temperature":
-                popt = fit_tof_temperature(x_vals, y_vals)
-                y_fit = tof_para(x_smooth, popt[0], popt[1], pC.const, pC.atom["K41"])
-                fit_label = f"{label} TOF: T={popt[0] * 1e6:.3f} µK"
-                self._record_result(label, "tof_temperature", popt[0], "K", "1D fit")
-                self._record_result(label, "tof_sigma0", popt[1], "m", "1D fit")
-            else:
-                return
-            plt.plot(x_smooth, y_fit, "--", color=resolved_color, linewidth=2, label=fit_label, alpha=0.8)
+            y_fit = fit_definition.model(x_smooth, *popt)
+            for row in fit_definition.record_rows(label, popt, perr):
+                self._record_result(**row)
+            plt.plot(x_smooth, y_fit, "--", color=resolved_color, linewidth=2, label=fit_definition.label(label, popt, perr), alpha=0.8)
         except Exception as exc:
             print(f"{fit_type} fit error for {label}: {exc}")
 
@@ -1336,6 +1320,8 @@ class DataAnalysisGUI(QWidget):
                 color_value = color.name() if color is not None else None
                 use_errorbar = config["mode"] == "Average over other scan parameter"
                 self._plot_series_with_fit(x_vals, y_vals, y_err, color_value, file_label, fit_type, use_errorbar)
+                if use_errorbar and np.any(y_err > 0):
+                    self._record_average_results(file_label, x_label, x_vals, config["y_name"] or y_label, y_vals, y_err)
 
             plt.xlabel(x_label)
             plt.ylabel(y_label)
@@ -1347,7 +1333,6 @@ class DataAnalysisGUI(QWidget):
             self.status_label.setText(f"Loaded {len(target_files)} CSV file(s) and created the 1D plot.")
         except Exception as exc:
             QMessageBox.critical(self, "Analysis failed", f"A problem occurred while creating the 1D plot:\n{exc}")
-
 
     def plot_2d_scatter_analysis(self):
         """Create a 2D scatter plot using the two selected scan parameters."""
