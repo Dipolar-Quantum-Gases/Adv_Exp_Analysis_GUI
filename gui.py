@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QColorDialog,
+    QCompleter,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -41,6 +42,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -50,6 +52,7 @@ from helper.dataprocessing.analysis import (
     detect_scan_parameters,
     load_selected_data,
     prepare_filtered_data as _prepare_filtered_data,
+    split_filtered_data_by_other,
 )
 from helper.fitting.models import (
     fit_exponential_decay,
@@ -62,6 +65,37 @@ from helper.physDataproc import get_ExpObserv
 from helper.plotting.analysis import plot_loaded_data
 
 plt.close("all")
+
+
+class CollapsibleSection(QWidget):
+    """A titled panel that collapses to a single header row to save vertical space."""
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.toggle_button = QToolButton(self)
+        self.toggle_button.setText(title)
+        self.toggle_button.setCheckable(True)
+        self.toggle_button.setChecked(True)
+        self.toggle_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle_button.setArrowType(Qt.ArrowType.DownArrow)
+        self.toggle_button.setStyleSheet("QToolButton { border: none; font-weight: bold; }")
+        self.toggle_button.clicked.connect(self._on_toggled)
+
+        self.content_area = QWidget(self)
+        self.content_layout = QVBoxLayout(self.content_area)
+        self.content_layout.setContentsMargins(4, 0, 4, 4)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        outer_layout.addWidget(self.toggle_button)
+        outer_layout.addWidget(self.content_area)
+
+    def _on_toggled(self):
+        """Show or hide the content area and flip the header arrow."""
+        expanded = self.toggle_button.isChecked()
+        self.content_area.setVisible(expanded)
+        self.toggle_button.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
 
 
 class DataAnalysisGUI(QWidget):
@@ -173,6 +207,7 @@ class DataAnalysisGUI(QWidget):
         self.main_param_combo = QComboBox(self)
         self.main_param_combo.addItem("No scan parameter selected")
         self.main_param_combo.setVisible(False)
+        self._make_searchable(self.main_param_combo)
         self.main_param_layout.addWidget(QLabel("Main scan parameter: "))
         self.main_param_layout.addWidget(self.main_param_combo)
         self.param_group.addLayout(self.main_param_layout)
@@ -181,6 +216,7 @@ class DataAnalysisGUI(QWidget):
         self.other_param_combo = QComboBox(self)
         self.other_param_combo.addItem("Not used")
         self.other_param_combo.setVisible(False)
+        self._make_searchable(self.other_param_combo)
         self.other_param_layout.addWidget(QLabel("Other scan parameter: "))
         self.other_param_layout.addWidget(self.other_param_combo)
         self.param_group.addLayout(self.other_param_layout)
@@ -191,7 +227,8 @@ class DataAnalysisGUI(QWidget):
         self.y_param_combo = QComboBox(self)
         self.y_param_combo.addItem("Not selected")
         self.y_param_combo.setVisible(False)
-        self.y_param_layout.addWidget(QLabel("Y Parameter: "))
+        self._make_searchable(self.y_param_combo)
+        self.y_param_layout.addWidget(QLabel("Y Parameter (type to search): "))
         self.y_param_layout.addWidget(self.y_param_combo)
         middle_group_layout.addLayout(self.y_param_layout)
 
@@ -241,16 +278,14 @@ class DataAnalysisGUI(QWidget):
 
         middle_layout.addStretch()
 
-        right_group = QGroupBox("Selected file output")
-        right_group_layout = QVBoxLayout(right_group)
-        right_group_layout.setSpacing(8)
-        right_layout.addWidget(right_group)
+        output_section = CollapsibleSection("Selected file output")
+        right_layout.addWidget(output_section)
 
         self.terminal_output = QPlainTextEdit(self)
         self.terminal_output.setReadOnly(True)
         self.terminal_output.setPlaceholderText("Selected file output will appear here...")
         self.terminal_output.setMaximumHeight(250)
-        right_group_layout.addWidget(self.terminal_output)
+        output_section.content_layout.addWidget(self.terminal_output)
 
         # Results workspace for fit parameters, manual values, and constants.
         self._build_results_workspace(right_layout)
@@ -261,9 +296,9 @@ class DataAnalysisGUI(QWidget):
         self._refresh_analysis_controls()
 
     def _build_results_workspace(self, parent_layout):
-        """Create tables and actions for collected results and physical constants."""
-        results_group = QGroupBox("Collected results")
-        results_layout = QVBoxLayout(results_group)
+        """Create collapsible sections for collected results and physical constants."""
+        results_section = CollapsibleSection("Collected results")
+        results_layout = results_section.content_layout
 
         self.results_table = QTableWidget(0, 6)
         self.results_table.setHorizontalHeaderLabels(["Keep", "Quantity", "Value", "Source", "Unit", "Origin"])
@@ -283,24 +318,40 @@ class DataAnalysisGUI(QWidget):
         save_button.clicked.connect(self.save_collected_data)
         results_buttons.addWidget(save_button)
         results_layout.addLayout(results_buttons)
-        parent_layout.addWidget(results_group)
+        parent_layout.addWidget(results_section)
 
         self._build_workspace_panel(parent_layout)
 
-        constants_group = QGroupBox("Physical constants")
-        constants_layout = QVBoxLayout(constants_group)
+        constants_section = CollapsibleSection("Physical constants")
+        constants_layout = constants_section.content_layout
+
+        species_row = QHBoxLayout()
+        species_row.addWidget(QLabel("Species:"))
+        self.species_combo = QComboBox()
+        self.species_combo.addItem("All")
+        self.species_combo.addItems(sorted(pC.atom.keys()))
+        self.species_combo.currentTextChanged.connect(self._on_species_changed)
+        species_row.addWidget(self.species_combo)
+        constants_layout.addLayout(species_row)
+
         self.constants_table = QTableWidget(0, 2)
         self.constants_table.setHorizontalHeaderLabels(["Name", "Value"])
+        self.constants_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.constants_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.constants_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.constants_table.horizontalHeader().setStretchLastSection(True)
         self._populate_constants_table()
         constants_layout.addWidget(self.constants_table)
-        parent_layout.addWidget(constants_group)
+
+        transfer_constants_button = QPushButton("Add selected to workspace")
+        transfer_constants_button.clicked.connect(self.transfer_constants_to_workspace)
+        constants_layout.addWidget(transfer_constants_button)
+        parent_layout.addWidget(constants_section)
 
     def _build_workspace_panel(self, parent_layout):
         """Create the panel holding transferred and custom workspace variables."""
-        workspace_group = QGroupBox("Workspace variables")
-        workspace_layout = QVBoxLayout(workspace_group)
+        workspace_section = CollapsibleSection("Workspace variables")
+        workspace_layout = workspace_section.content_layout
 
         self.workspace_table = QTableWidget(0, 4)
         self.workspace_table.setHorizontalHeaderLabels(["Name", "Shape", "Value", "Source"])
@@ -317,7 +368,7 @@ class DataAnalysisGUI(QWidget):
         remove_variable_button.clicked.connect(self.remove_selected_variable)
         workspace_buttons.addWidget(remove_variable_button)
         workspace_layout.addLayout(workspace_buttons)
-        parent_layout.addWidget(workspace_group)
+        parent_layout.addWidget(workspace_section)
 
     def _parse_array_literal(self, text):
         """Parse scalars, comma lists, or nested lists into a NumPy array of any shape."""
@@ -359,7 +410,7 @@ class DataAnalysisGUI(QWidget):
             self._set_workspace_variable(name, array, source=row["source"])
 
     def add_custom_variable(self):
-        """Open a dialog for adding a scalar or array variable of any shape."""
+        """Open a dialog for adding a scalar/array variable, or combining existing ones."""
         dialog = QDialog(self)
         dialog.setWindowTitle("Add custom variable")
         form = QFormLayout(dialog)
@@ -367,6 +418,12 @@ class DataAnalysisGUI(QWidget):
         value_field = QLineEdit()
         form.addRow("Name:", name_field)
         form.addRow("Value (e.g. 3.4 or 1,2,3 or [[1,2],[3,4]]):", value_field)
+
+        existing_list = QListWidget()
+        existing_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        existing_list.addItems(sorted(self.workspace_variables))
+        form.addRow("Or combine existing variables (ordered selection):", existing_list)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
@@ -378,12 +435,19 @@ class DataAnalysisGUI(QWidget):
         if not name:
             QMessageBox.warning(self, "Invalid name", "Please enter a variable name.")
             return
-        try:
-            array = self._parse_array_literal(value_field.text().strip())
-        except (ValueError, SyntaxError) as exc:
-            QMessageBox.warning(self, "Invalid value", f"Could not parse the value:\n{exc}")
-            return
-        self._set_workspace_variable(name, array, source="manual")
+
+        selected_names = [item.text() for item in existing_list.selectedItems()]
+        if selected_names:
+            array = np.concatenate([np.atleast_1d(self.workspace_variables[n]["value"]) for n in selected_names])
+            source = "combined: " + ", ".join(selected_names)
+        else:
+            try:
+                array = self._parse_array_literal(value_field.text().strip())
+            except (ValueError, SyntaxError) as exc:
+                QMessageBox.warning(self, "Invalid value", f"Could not parse the value:\n{exc}")
+                return
+            source = "manual"
+        self._set_workspace_variable(name, array, source=source)
 
     def remove_selected_variable(self):
         """Remove the workspace variable selected in the workspace table."""
@@ -395,10 +459,16 @@ class DataAnalysisGUI(QWidget):
         self.workspace_variables.pop(name, None)
         self._refresh_workspace_table()
 
-    def _populate_constants_table(self):
-        """Display universal constants and atomic parameters available to the analysis."""
-        rows = [(f"const.{name}", value) for name, value in pC.const.items()]
-        for atom_name, parameters in pC.atom.items():
+    def _populate_constants_table(self, species="All"):
+        """Display physical constants, optionally filtered to a single atomic species."""
+        if species == "All":
+            rows = [(f"const.{name}", value) for name, value in pC.const.items()]
+            atoms_to_show = pC.atom.items()
+        else:
+            rows = []
+            atoms_to_show = [(species, pC.atom[species])]
+
+        for atom_name, parameters in atoms_to_show:
             for parameter_name, value in parameters.items():
                 if isinstance(value, dict):
                     for nested_name, nested_value in value.items():
@@ -411,13 +481,32 @@ class DataAnalysisGUI(QWidget):
             self.constants_table.setItem(row_index, 0, QTableWidgetItem(name))
             self.constants_table.setItem(row_index, 1, QTableWidgetItem(str(value)))
 
+    def _on_species_changed(self, species):
+        """Refresh the constants table to show only the chosen atomic species."""
+        self._populate_constants_table(species)
+
+    def transfer_constants_to_workspace(self):
+        """Copy the selected physical constants into the workspace as named variables."""
+        selected_rows = sorted({item.row() for item in self.constants_table.selectedItems()})
+        if not selected_rows:
+            QMessageBox.warning(self, "No constants selected", "Select one or more rows in the constants table first.")
+            return
+        for row in selected_rows:
+            name = self.constants_table.item(row, 0).text().replace(".", "_")
+            value_text = self.constants_table.item(row, 1).text()
+            try:
+                array = self._parse_array_literal(value_text)
+            except (ValueError, SyntaxError):
+                continue
+            self._set_workspace_variable(name, array, source="physical constant")
+
     def _refresh_results_table(self):
         """Render collected rows while preserving each row's keep selection."""
         self.results_table.setRowCount(len(self.result_rows))
         for row_index, row in enumerate(self.result_rows):
             keep_item = QTableWidgetItem()
             keep_item.setFlags(keep_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            keep_item.setCheckState(Qt.CheckState.Checked if row.get("keep", True) else Qt.CheckState.Unchecked)
+            keep_item.setCheckState(Qt.CheckState.Checked if row.get("keep", False) else Qt.CheckState.Unchecked)
             keep_item.setData(Qt.ItemDataRole.UserRole, row)
             self.results_table.setItem(row_index, 0, keep_item)
             for column, key in enumerate(("quantity", "value", "source", "unit", "origin"), start=1):
@@ -432,7 +521,7 @@ class DataAnalysisGUI(QWidget):
             if not (row.get("file_path") == file_path and row.get("automatic"))
         ]
         for row in rows:
-            row["keep"] = existing.get(row["quantity"], {}).get("keep", True)
+            row["keep"] = existing.get(row["quantity"], {}).get("keep", False)
             row["automatic"] = True
             row["file_path"] = file_path
             self.result_rows.append(row)
@@ -442,8 +531,37 @@ class DataAnalysisGUI(QWidget):
         """Return checked result rows, synchronizing checkbox states first."""
         for row_index, row in enumerate(self.result_rows):
             item = self.results_table.item(row_index, 0)
-            row["keep"] = item.checkState() == Qt.CheckState.Checked if item else row.get("keep", True)
-        return [row for row in self.result_rows if row.get("keep", True)]
+            row["keep"] = item.checkState() == Qt.CheckState.Checked if item else row.get("keep", False)
+        return [row for row in self.result_rows if row.get("keep", False)]
+
+    def _record_result(self, source, quantity, value, unit, origin):
+        """Add a newly computed fit or summary value to the collected-results table."""
+        self.result_rows.append({
+            "source": source, "quantity": quantity, "value": value, "unit": unit,
+            "origin": origin, "keep": False, "automatic": False,
+        })
+        self._refresh_results_table()
+
+    def _record_file_arrays(self, file_path, label, data):
+        """Add each scan parameter's and value column's full array, skipping ones already recorded."""
+        columns = [(name, "scan parameter array") for name in detect_scan_parameters([file_path]) if name in data.columns]
+        columns += [(name, "value array") for name in VAL_NAME if name in data.columns]
+
+        recorded = {
+            row["quantity"] for row in self.result_rows
+            if row.get("file_path") == file_path and row.get("origin") in ("scan parameter array", "value array")
+        }
+        added = False
+        for name, origin in columns:
+            if name in recorded:
+                continue
+            self.result_rows.append({
+                "source": label, "quantity": name, "value": data[name].tolist(), "unit": "",
+                "origin": origin, "keep": False, "automatic": True, "file_path": file_path,
+            })
+            added = True
+        if added:
+            self._refresh_results_table()
 
     def add_manual_data(self):
         """Open a small form for adding a user-defined result row."""
@@ -451,11 +569,15 @@ class DataAnalysisGUI(QWidget):
         dialog.setWindowTitle("Add data")
         form = QFormLayout(dialog)
         source = QLineEdit("Manual")
-        quantity = QLineEdit()
+        # Offer every detected scan parameter and fit observable, searchable, but still editable for custom names.
+        quantity = QComboBox()
+        quantity.setEditable(True)
+        quantity.addItems(list(dict.fromkeys(detect_scan_parameters(self.selected_files) + self.yparams)))
+        self._make_searchable(quantity)
         value = QLineEdit()
         unit = QLineEdit()
         form.addRow("Source:", source)
-        form.addRow("Quantity:", quantity)
+        form.addRow("Quantity (type to search):", quantity)
         form.addRow("Value:", value)
         form.addRow("Unit:", unit)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -463,10 +585,10 @@ class DataAnalysisGUI(QWidget):
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
 
-        if dialog.exec() == QDialog.DialogCode.Accepted and quantity.text().strip() and value.text().strip():
+        if dialog.exec() == QDialog.DialogCode.Accepted and quantity.currentText().strip() and value.text().strip():
             self.result_rows.append({
                 "source": source.text().strip() or "Manual",
-                "quantity": quantity.text().strip(),
+                "quantity": quantity.currentText().strip(),
                 "value": value.text().strip(),
                 "unit": unit.text().strip(),
                 "origin": "manual",
@@ -492,6 +614,16 @@ class DataAnalysisGUI(QWidget):
         )
         pd.concat([output, constants], ignore_index=True).to_csv(file_path, index=False)
         self.status_label.setText(f"Saved {len(results)} collected result(s) to {os.path.basename(file_path)}")
+
+    def _make_searchable(self, combo):
+        """Let the user type to filter this combo box's items instead of scrolling."""
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        completer = QCompleter(combo.model(), combo)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        combo.setCompleter(completer)
 
     def _refresh_analysis_controls(self):
         """Refresh scan-parameter choices after the selected files change."""
@@ -532,13 +664,17 @@ class DataAnalysisGUI(QWidget):
             self.y_param_combo.setCurrentIndex(0)
         self.y_param_combo.blockSignals(False)
 
+        # "Specific value" and the per-value split only make sense with a second parameter.
+        extra_modes = ("Specific value", "Split by other scan parameter")
         if current_other != "Not used":
-            if self.display_mode_combo.findText("Specific value") == -1:
-                self.display_mode_combo.addItem("Specific value")
+            for extra_mode in extra_modes:
+                if self.display_mode_combo.findText(extra_mode) == -1:
+                    self.display_mode_combo.addItem(extra_mode)
         else:
-            index = self.display_mode_combo.findText("Specific value")
-            if index != -1:
-                self.display_mode_combo.removeItem(index)
+            for extra_mode in extra_modes:
+                index = self.display_mode_combo.findText(extra_mode)
+                if index != -1:
+                    self.display_mode_combo.removeItem(index)
 
         selected_mode = self.display_mode_combo.currentText()
         other_name = self._selected_name(self.other_param_combo)
@@ -593,6 +729,10 @@ class DataAnalysisGUI(QWidget):
             if filter_value in ("Select a value", "No values found") or filter_value == "":
                 QMessageBox.warning(self, "Invalid choice", "Please select a valid value for the other scan parameter.")
                 return None
+
+        if mode == "Split by other scan parameter" and other_name is None:
+            QMessageBox.warning(self, "Invalid choice", "Please choose the other scan parameter first.")
+            return None
 
         if mode == "Average over other scan parameter" and other_name is None:
             other_name = None
@@ -756,6 +896,13 @@ class DataAnalysisGUI(QWidget):
                 {"source": label, "quantity": "x0_mean", "value": x0_mean, "unit": "", "origin": "summary"},
                 {"source": label, "quantity": "y0_mean", "value": y0_mean, "unit": "", "origin": "summary"},
             ]
+            # Keep the full data column for every scan parameter and fit observable available.
+            for name in scan_params:
+                if name in data.columns:
+                    result_rows.append({"source": label, "quantity": name, "value": data[name].tolist(), "unit": "", "origin": "scan parameter array"})
+            for name in VAL_NAME:
+                if name in data.columns:
+                    result_rows.append({"source": label, "quantity": name, "value": data[name].tolist(), "unit": "", "origin": "value array"})
             if popt is not None:
                 result_rows.extend([
                     {"source": label, "quantity": "decay_amplitude", "value": popt[0], "unit": "", "origin": "exponential fit"},
@@ -943,6 +1090,44 @@ class DataAnalysisGUI(QWidget):
         if handler is not None:
             handler()
 
+    def _plot_series_with_fit(self, x_vals, y_vals, y_err, color_value, label, fit_type, use_errorbar):
+        """Plot one data series and overlay the requested fit using a shared color."""
+        if use_errorbar and np.any(y_err > 0):
+            handle = plt.errorbar(x_vals, y_vals, yerr=y_err, fmt="o", capsize=4, color=color_value, label=label)
+            resolved_color = color_value if color_value is not None else handle.lines[0].get_color()
+        else:
+            handle = plt.scatter(x_vals, y_vals, s=18, color=color_value, label=label)
+            resolved_color = color_value if color_value is not None else handle.get_facecolor()[0]
+
+        if fit_type == "No fit" or len(x_vals) <= 2:
+            return
+        try:
+            x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
+            if fit_type == "Exponential decay (with offset)":
+                popt = fit_exponential_decay(x_vals, y_vals)
+                y_fit = popt[0] * np.exp(-x_smooth / popt[2]) + popt[1]
+                fit_label = f"{label} fit: τ={popt[2]:.3f}"
+                self._record_result(label, "decay_amplitude", popt[0], "", "1D fit")
+                self._record_result(label, "decay_tau", popt[2], "", "1D fit")
+                self._record_result(label, "decay_offset", popt[1], "", "1D fit")
+            elif fit_type == "Exponential decay (lifetime)":
+                popt = fit_exponential_decay_no_offset(x_vals, y_vals)
+                y_fit = popt[0] * np.exp(-x_smooth / popt[1])
+                fit_label = f"{label} lifetime: τ={popt[1]:.3f}"
+                self._record_result(label, "lifetime_amplitude", popt[0], "", "1D fit")
+                self._record_result(label, "lifetime_tau", popt[1], "", "1D fit")
+            elif fit_type == "TOF temperature":
+                popt = fit_tof_temperature(x_vals, y_vals)
+                y_fit = tof_para(x_smooth, popt[0], popt[1], pC.const, pC.atom["K41"])
+                fit_label = f"{label} TOF: T={popt[0] * 1e6:.3f} µK"
+                self._record_result(label, "tof_temperature", popt[0], "K", "1D fit")
+                self._record_result(label, "tof_sigma0", popt[1], "m", "1D fit")
+            else:
+                return
+            plt.plot(x_smooth, y_fit, "--", color=resolved_color, linewidth=2, label=fit_label, alpha=0.8)
+        except Exception as exc:
+            print(f"{fit_type} fit error for {label}: {exc}")
+
     def plot_1d_analysis(self):
         """Plot the selected value for each file and optionally overlay a fit."""
         if not self.selected_files:
@@ -954,73 +1139,45 @@ class DataAnalysisGUI(QWidget):
             return
 
         main_name = config["main_name"]
+        other_name = config["other_name"]
+        fit_type = config.get("fit_type", "No fit")
+        is_split_mode = config["mode"] == "Split by other scan parameter"
         selected_scan_names = [main_name] if main_name else []
         target_files = self.selected_target_files()
+        x_label, y_label = "Sample index", "Sample value"
         try:
             plt.figure()
             for file_path in target_files:
                 filedata = self.load_data_for_analysis([file_path], selected_scan_names)
+                file_label = self.display_label_for_file(file_path)
+                self._record_file_arrays(file_path, file_label, filedata["data"])
+
+                if is_split_mode:
+                    # Each value of the other scan parameter becomes its own series and fit.
+                    series, x_label, y_label = split_filtered_data_by_other(
+                        filedata, main_name, other_name, value_column=config["y_name"]
+                    )
+                    for other_value, x_vals, y_vals in series:
+                        if len(x_vals) == 0:
+                            continue
+                        series_label = f"{file_label} ({other_name}={other_value})"
+                        self._plot_series_with_fit(
+                            x_vals, y_vals, np.zeros_like(y_vals), None, series_label, fit_type, use_errorbar=False
+                        )
+                    continue
+
                 x_vals, y_vals, y_err, x_label, y_label = _prepare_filtered_data(
                     filedata,
                     main_name,
-                    config["other_name"],
+                    other_name,
                     config["mode"],
                     config["other_value"],
                     value_column=config["y_name"],
                 )
                 color = self.color_for_file(file_path)
                 color_value = color.name() if color is not None else None
-                if config["mode"] == "Average over other scan parameter" and np.any(y_err > 0):
-                    plt.errorbar(
-                        x_vals,
-                        y_vals,
-                        yerr=y_err,
-                        fmt="o",
-                        capsize=4,
-                        color=color_value,
-                        label=self.display_label_for_file(file_path),
-                    )
-                else:
-                    plt.scatter(
-                        x_vals,
-                        y_vals,
-                        s=18,
-                        color=color_value,
-                        label=self.display_label_for_file(file_path),
-                    )
-
-                # Fit overlays use the same filtered data as the plotted points.
-                fit_type = config.get("fit_type", "No fit")
-                if fit_type == "Exponential decay (with offset)" and len(x_vals) > 2:
-                    try:
-                        popt = fit_exponential_decay(x_vals, y_vals)
-                        x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
-                        y_fit = popt[0] * np.exp(-x_smooth / popt[2]) + popt[1]
-                        fit_label = f"Decay fit: τ={popt[2]:.3f}"
-                        plt.plot(x_smooth, y_fit, "--", color=color_value, linewidth=2, label=fit_label, alpha=0.8)
-                    except Exception as e:
-                        print(f"Exponential decay fit error: {e}")
-                elif fit_type == "Exponential decay (lifetime)" and len(x_vals) > 2:
-                    try:
-                        popt = fit_exponential_decay_no_offset(x_vals, y_vals)
-                        x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
-                        y_fit = popt[0] * np.exp(-x_smooth / popt[1])
-                        fit_label = f"Lifetime: τ={popt[1]:.3f}"
-                        plt.plot(x_smooth, y_fit, "--", color=color_value, linewidth=2, label=fit_label, alpha=0.8)
-                    except Exception as e:
-                        print(f"Exponential decay (no offset) fit error: {e}")
-                elif fit_type == "TOF temperature" and len(x_vals) > 2:
-                    try:
-                        popt = fit_tof_temperature(x_vals, y_vals)
-                        x_smooth = np.linspace(x_vals.min(), x_vals.max(), 100)
-                        print(["TOF fit: ", popt])
-                        pCon = pC.const
-                        atom = pC.atom["K41"]
-                        y_fit = tof_para(x_smooth, popt[0], popt[1], pCon, atom)
-                        fit_label = f"TOF fit: T={popt[0]*1e6:.3f} / Sigma_0={popt[1]*1e6:.3f}"
-                        plt.plot(x_smooth, y_fit, "--", color=color_value, linewidth=2, label=fit_label, alpha=0.8)
-                    except Exception as e:
-                        print(f"TOF fit error: {e}")
+                use_errorbar = config["mode"] == "Average over other scan parameter"
+                self._plot_series_with_fit(x_vals, y_vals, y_err, color_value, file_label, fit_type, use_errorbar)
 
             plt.xlabel(x_label)
             plt.ylabel(y_label)
@@ -1032,6 +1189,7 @@ class DataAnalysisGUI(QWidget):
             self.status_label.setText(f"Loaded {len(target_files)} CSV file(s) and created the 1D plot.")
         except Exception as exc:
             QMessageBox.critical(self, "Analysis failed", f"A problem occurred while creating the 1D plot:\n{exc}")
+
 
     def plot_2d_scatter_analysis(self):
         """Create a 2D scatter plot using the two selected scan parameters."""

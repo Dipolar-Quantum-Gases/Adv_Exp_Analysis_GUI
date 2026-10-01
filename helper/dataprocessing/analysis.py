@@ -76,6 +76,43 @@ def prepare_filtered_data(filedata, main_name=None, other_name=None, filter_mode
     return x, y, np.zeros_like(y), x_label, y_label
 
 
+def split_filtered_data_by_other(filedata, main_name=None, other_name=None, value_column="atom_number_fit"):
+    """Split finite x/y data into one series per unique value of the other scan parameter."""
+    if filedata is None or filedata["data"].empty or other_name is None:
+        return [], "Sample index", "Sample value"
+
+    data = filedata["data"].copy()
+    if other_name not in data.columns:
+        return [], "Sample index", "Sample value"
+
+    if value_column in data.columns:
+        y = data[value_column].to_numpy(dtype=float)
+        y_label = value_column
+    else:
+        y = np.arange(len(data), dtype=float)
+        y_label = "Sample value"
+
+    if main_name is not None and main_name in data.columns:
+        x = data[main_name].to_numpy(dtype=float)
+        x_label = main_name
+    else:
+        x = np.arange(len(data), dtype=float)
+        x_label = "Sample index"
+
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    other_values = data.loc[mask, other_name].to_numpy()
+
+    unique_values = pd.unique(other_values)
+    try:
+        unique_values = sorted(unique_values, key=_numeric_or_text)
+    except TypeError:
+        unique_values = sorted(unique_values, key=str)
+
+    series = [(value, x[other_values == value], y[other_values == value]) for value in unique_values]
+    return series, x_label, y_label
+
+
 def load_selected_data(file_paths, scan_var_names=None):
     """Load selected CSV files using the scan variables chosen in the GUI."""
     if not file_paths:
