@@ -1,8 +1,11 @@
+"""Low-level CSV loading and observable extraction helpers."""
+
 import numpy as np
 import pandas as pd
 
 
 def load_csv_data(path, filename, valName, genParams, b2D=False):
+    """Load one CSV file and separate values from varying scan parameters."""
     data = pd.read_csv(f"{path}\\{filename}.csv", encoding="utf-8", skipinitialspace=True)
     if data.empty:
         raise ValueError("The loaded data is empty. Please check the file path and name.")
@@ -21,6 +24,7 @@ def load_csv_data(path, filename, valName, genParams, b2D=False):
 
 
 def load_multiple_files(paths, filenames, valName, genParams, b2D=False, filetype="csv", scanAuto=True, **kwargs):
+    """Load multiple CSV files and concatenate their values and scan variables."""
     data_list = []
     values_list = []
     scan_param_list = []
@@ -70,6 +74,7 @@ def load_multiple_files(paths, filenames, valName, genParams, b2D=False, filetyp
 
 
 def get_ExpObserv(values, sample_factor=1):
+    """Extract atom number, widths, and fitted positions from a values table."""
     return (
         values["atom_number_fit"].to_numpy() * sample_factor,
         values["sig_xx"].to_numpy() * sample_factor,

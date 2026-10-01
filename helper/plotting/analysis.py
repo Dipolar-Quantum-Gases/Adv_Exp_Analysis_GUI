@@ -1,3 +1,5 @@
+"""High-level plotting operations that connect loaded data to plot helpers."""
+
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -7,6 +9,7 @@ from helper.physPlot import plot_2Ddata_heatmap, plot_2Ddata_scatter
 
 
 def plot_loaded_data(filedata, scan_var_names=None, plot_kind="1d"):
+    """Create a 1D, 2D scatter, or 2D heatmap plot from loaded experiment data."""
     if filedata is None:
         return
     atomnumber, _, _, _, _ = get_ExpObserv(filedata["values"], sample_factor=SAMPLE)

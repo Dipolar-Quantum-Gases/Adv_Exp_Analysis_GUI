@@ -1,7 +1,8 @@
-# physicalConstants.py
+"""Physical constants and atomic parameters used by the analysis models."""
+
 import numpy as np
 
-# Universal physical constants
+# Universal physical constants in SI units unless otherwise noted.
 const = {
     "c": 299792458,           # Speed of light [m/s]
     "e": 1.602176634e-19,     # Elementary charge [C]
@@ -20,7 +21,7 @@ const = {
 const["hbar"] = const["h"]/(2*np.pi)
 const["au"] = 2.48832e-8*const["h"]
 
-# Define atoms and their relevant parameters
+# Atomic masses, transition wavelengths, and selected polarizability data.
 atom = {
     "Rb87": {
         "m": 1.44316060e-25,  # Mass [kg]
