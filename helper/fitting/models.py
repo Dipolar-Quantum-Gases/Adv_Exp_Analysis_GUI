@@ -29,9 +29,25 @@ def fit_exponential_decay_no_offset(x_vals, y_vals):
     return popt, np.sqrt(np.diag(pcov))
 
 
+_tof_atom = "K41"
+
+
+def set_tof_atom(name):
+    """Select the species (key of physicalConstants.atom) used by the TOF fit and model."""
+    global _tof_atom
+    if name not in pC.atom:
+        raise KeyError(f"Unknown atom species: {name}")
+    _tof_atom = name
+
+
+def get_tof_atom():
+    """Return the currently selected TOF species name."""
+    return _tof_atom
+
+
 def tof_para(t, temperature, sigma0, constants, atom):
     """Calculate cloud width during time of flight for a temperature and atom."""
-    return np.sqrt(sigma0**2 + 2 * constants["k_B"] * temperature / atom["m"] * (t / 1000) ** 2)
+    return np.sqrt(sigma0**2 + constants["k_B"] * temperature / atom["m"] * (t / 1000) ** 2)
 
 
 def fit_tof_temperature(x_vals, sigma_vals):
@@ -47,7 +63,7 @@ def fit_tof_temperature(x_vals, sigma_vals):
     # Error propagation through sqrt diverges at sigma0 = 0, so fall back to 0 there.
     sigma0_err = intercept_err / (2 * sigma0) if sigma0 > 0 else 0.0
 
-    scale = pC.atom["K41"]["m"] / (2 * pC.const["k_B"])
+    scale = pC.atom[_tof_atom]["m"] / pC.const["k_B"]
     temperature = slope * scale
     temperature_err = slope_err * scale
 

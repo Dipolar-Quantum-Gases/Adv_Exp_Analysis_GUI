@@ -55,6 +55,7 @@ from helper.dataprocessing.analysis import (
     prepare_filtered_data as _prepare_filtered_data,
     split_filtered_data_by_other,
 )
+from helper.fitting.models import get_tof_atom, set_tof_atom
 from helper.fitting.registry import FIT_NAMES, get_fit_definition
 from helper.formatting import format_with_uncertainty, mean_with_sem
 from helper import physicalConstants as pC
@@ -156,6 +157,15 @@ class DataAnalysisGUI(QWidget):
         self.load_button = QPushButton("Select CSV files")
         self.load_button.clicked.connect(self.select_csv_files)
         left_group_layout.addWidget(self.load_button)
+
+        atom_row = QHBoxLayout()
+        atom_row.addWidget(QLabel("Atom (TOF fit):"))
+        self.atom_combo = QComboBox()
+        self.atom_combo.addItems(list(pC.atom.keys()))
+        self.atom_combo.setCurrentText(get_tof_atom())
+        self.atom_combo.currentTextChanged.connect(set_tof_atom)
+        atom_row.addWidget(self.atom_combo)
+        left_group_layout.addLayout(atom_row)
 
         self.remove_file_button = QPushButton("Remove selected CSV")
         self.remove_file_button.clicked.connect(self.remove_selected_csv_file)

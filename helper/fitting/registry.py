@@ -40,6 +40,7 @@ from helper.fitting.models import (
     fit_exponential_decay,
     fit_exponential_decay_no_offset,
     fit_tof_temperature,
+    get_tof_atom,
     tof_para,
 )
 from helper.formatting import format_with_uncertainty
@@ -87,7 +88,7 @@ FIT_DEFINITIONS = [
         name="TOF temperature",
         slug="tof",
         fit=fit_tof_temperature,
-        model=lambda x, temperature, sigma0: tof_para(x, temperature, sigma0, pC.const, pC.atom["K41"]),
+        model=lambda x, temperature, sigma0: tof_para(x, temperature, sigma0, pC.const, pC.atom[get_tof_atom()]),
         param_names=("temperature", "sigma0"),
         units=("K", "m"),
         label=lambda source, popt, perr: f"{source} TOF: T={format_with_uncertainty(popt[0] * 1e6, perr[0] * 1e6)} µK",
